@@ -1,30 +1,66 @@
-# C++ 관련
+# Build directories
+build/
+*/build/
+**/build/
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Compiled files
 *.o
-*.obj
-*.exe
 *.out
-*.app
+*.exe
 *.dll
 *.so
 *.dylib
-build/
-Debug/
-Release/
-.vs/
-*.sln
-*.vcxproj
-*.vcxproj.filters
-*.vcxproj.user
 
-# Python 관련
-venv/
-env/
-.env/
+# Python
 __pycache__/
 *.py[cod]
 *$py.class
 *.so
 .Python
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+venv/
+.env/
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+install_manifest.txt
+compile_commands.json
+CTestTestfile.cmake
+_deps
+
+# C++ 관련
+*.obj
+*.app
+*.dll
+*.dylib
+*.vcxproj
+*.vcxproj.filters
+*.vcxproj.user
+
+# Python 관련
 .pytest_cache/
 .coverage
 htmlcov/
@@ -38,10 +74,6 @@ coverage.xml
 *.py,cover
 
 # IDE 관련
-.idea/
-.vscode/
-*.swp
-*.swo
 .DS_Store
 
 # 의존성 관련
