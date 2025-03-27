@@ -2,7 +2,79 @@
 #include <random>
 #include <chrono>
 
-GameManager::GameManager() : gameStarted(false) {
+GameManager::GameManager(EventBus& bus) : gameStarted(false), eventBus(bus) {
+    setupEventHandlers();
+}
+
+void GameManager::setupEventHandlers() {
+    // 클라이언트 연결 이벤트 구독
+    eventBus.subscribe("client_connected", [this](const Event& event) {
+        int playerId = event.data["player_id"];
+        int socket = event.data["socket"];
+        this->addPlayer(playerId, socket);
+    });
+    
+    // 클라이언트 연결 종료 이벤트 구독
+    eventBus.subscribe("client_disconnected", [this](const Event& event) {
+        int playerId = event.data["player_id"];
+        this->removePlayer(playerId);
+        
+        // 게임 상태 업데이트 이벤트 발행
+        eventBus.publish("game_state_updated", this->getGameState());
+    });
+    
+    // 클라이언트 메시지 수신 이벤트 구독
+    eventBus.subscribe("client_message_received", [this](const Event& event) {
+        int playerId = event.data["player_id"];
+        std::string msgType = event.data["type"];
+        
+        if (msgType == "request_new_piece") {
+            this->handleNewPiece(playerId);
+        }
+        else if (msgType == "move_request") {
+            this->handleMove(playerId, event.data["direction"]);
+        }
+        else if (msgType == "rotate_request") {
+            this->handleRotate(playerId);
+        }
+        else if (msgType == "hard_drop_request") {
+            this->handleHardDrop(playerId);
+        }
+        else if (msgType == "move_down_request") {
+            this->handleMoveDown(playerId);
+        }
+        
+        // 게임 상태 업데이트 이벤트 발행
+        eventBus.publish("game_state_updated", this->getGameState());
+    });
+    
+    // 플레이어 정보 요청 이벤트 구독
+    eventBus.subscribe("request_player_info", [this](const Event& event) {
+        std::string action = event.data["action"];
+        
+        if (action == "get_all_players") {
+            json playerData;
+            for (const auto& [id, player] : players) {
+                playerData[std::to_string(id)] = {
+                    {"socket", player.socket}
+                };
+            }
+            eventBus.publish("player_info_response", {
+                {"action", "all_players_info"},
+                {"players", playerData}
+            });
+        }
+        else if (action == "get_player_socket") {
+            int playerId = event.data["player_id"];
+            if (players.find(playerId) != players.end()) {
+                eventBus.publish("player_info_response", {
+                    {"action", "player_socket_info"},
+                    {"player_id", playerId},
+                    {"socket", players[playerId].socket}
+                });
+            }
+        }
+    });
 }
 
 void GameManager::addPlayer(int playerId, int socket) {
@@ -20,10 +92,15 @@ void GameManager::addPlayer(int playerId, int socket) {
     newPlayer.currentPos = {0, 5};
     
     players[playerId] = newPlayer;
+    
+    // 플레이어 추가 완료 이벤트 발행
+    eventBus.publish("player_added", {{"player_id", playerId}});
 }
 
 void GameManager::removePlayer(int playerId) {
     players.erase(playerId);
+    // 플레이어 제거 완료 이벤트 발행
+    eventBus.publish("player_removed", {{"player_id", playerId}});
 }
 
 void GameManager::handleNewPiece(int playerId) {

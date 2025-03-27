@@ -3,6 +3,7 @@
 #include <map>
 #include <nlohmann/json.hpp>
 #include "PlayerInfo.hpp"
+#include "Event.hpp"
 
 using json = nlohmann::json;
 using namespace std;
@@ -13,9 +14,11 @@ private:
     static const int GRID_HEIGHT = 20;
     map<int, PlayerInfo> players;
     bool gameStarted;
+    EventBus& eventBus;
 
 public:
-    GameManager();
+    GameManager(EventBus& bus);
+    void setupEventHandlers();
     void addPlayer(int playerId, int socket);
     void removePlayer(int playerId);
     void handleNewPiece(int playerId);

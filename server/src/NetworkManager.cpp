@@ -4,8 +4,9 @@
 #include <unistd.h>
 #include <iostream>
 #include <thread>
+#include <string.h> // strerror 사용을 위해 추가
 
-NetworkManager::NetworkManager(int port, GameManager& gm) : gameManager(gm) {
+NetworkManager::NetworkManager(int port, EventBus& bus) : eventBus(bus) {
     listenSocket = socket(AF_INET, SOCK_STREAM, 0);
     if (listenSocket < 0) {
         throw std::runtime_error("소켓 생성 실패");
@@ -29,6 +30,53 @@ NetworkManager::NetworkManager(int port, GameManager& gm) : gameManager(gm) {
     if (listen(listenSocket, SOMAXCONN) < 0) {
         throw std::runtime_error("리스닝 실패");
     }
+    
+    setupEventHandlers();
+}
+
+void NetworkManager::setupEventHandlers() {
+    // 플레이어 추가 완료 이벤트 구독
+    eventBus.subscribe("player_added", [this](const Event& event) {
+        int playerId = event.data["player_id"];
+        json response = {
+            {"type", "connect_response"},
+            {"player_id", playerId}
+        };
+        sendToPlayer(playerId, response.dump());
+    });
+    
+    // 게임 상태 업데이트 이벤트 구독
+    eventBus.subscribe("game_state_updated", [this](const Event& event) {
+        broadcastGameState(event.data);
+    });
+    
+    // 플레이어 정보 응답 이벤트 구독 (소켓 정보)
+    eventBus.subscribe("player_info_response", [this](const Event& event) {
+        std::string action = event.data["action"];
+        
+        if (action == "player_socket_info") {
+            int playerId = event.data["player_id"];
+            int socket = event.data["socket"];
+            
+            if (event.data.contains("message")) {
+                std::string message = event.data["message"];
+                std::string msg = message + "\n";
+                send(socket, msg.c_str(), msg.length(), 0);
+            }
+        }
+        else if (action == "all_players_info") {
+            if (event.data.contains("game_state") && event.data.contains("players")) {
+                json gameState = event.data["game_state"];
+                std::string stateMsg = gameState.dump() + "\n";
+                
+                json players = event.data["players"];
+                for (auto& [id, player] : players.items()) {
+                    int socket = player["socket"];
+                    send(socket, stateMsg.c_str(), stateMsg.length(), 0);
+                }
+            }
+        }
+    });
 }
 
 NetworkManager::~NetworkManager() {
@@ -48,85 +96,59 @@ void NetworkManager::acceptClient() {
     static int nextPlayerId = 1;
     int playerId = nextPlayerId++;
 
-    gameManager.addPlayer(playerId, clientSocket);
-
-    // 플레이어 ID 전송
-    json response = {
-        {"type", "connect_response"},
-        {"player_id", playerId}
-    };
-    sendToPlayer(playerId, response.dump());
-    
-    // 게임 상태 브로드캐스트
-    broadcastGameState();
+    // 클라이언트 연결 이벤트 발행
+    eventBus.publish("client_connected", {
+        {"player_id", playerId},
+        {"socket", clientSocket}
+    });
     
     // 클라이언트 메시지 처리 스레드 시작
-    std::thread([this, playerId]() {
-        this->handleClientMessages(playerId);
+    std::thread([this, playerId, clientSocket]() {
+        this->handleClientMessages(playerId, clientSocket);
     }).detach();
 }
 
-void NetworkManager::handleClientMessages(int playerId) {
+void NetworkManager::handleClientMessages(int playerId, int clientSocket) {
     char buffer[4096];
-    auto& player = gameManager.getPlayer(playerId);
 
     while (true) {
-        int bytesRead = recv(player.socket, buffer, sizeof(buffer) - 1, 0);
+        int bytesRead = recv(clientSocket, buffer, sizeof(buffer) - 1, 0);
         if (bytesRead <= 0) {
             std::cout << "플레이어 " << playerId << " 연결 종료" << std::endl;
-            gameManager.removePlayer(playerId);
-            broadcastGameState();
+            // 클라이언트 연결 종료 이벤트 발행
+            eventBus.publish("client_disconnected", {{"player_id", playerId}});
             break;
         }
 
         buffer[bytesRead] = '\0';
-        handleClientMessage(playerId, std::string(buffer));
+        
+        // 클라이언트 메시지 수신 이벤트 발행
+        try {
+            json msg = json::parse(std::string(buffer));
+            msg["player_id"] = playerId;
+            eventBus.publish("client_message_received", msg);
+        }
+        catch (const json::parse_error& e) {
+            std::cout << "JSON 파싱 오류: " << e.what() << std::endl;
+        }
     }
 }
 
-void NetworkManager::handleClientMessage(int playerId, const std::string& message) {
-    try {
-        json msg = json::parse(message);
-        std::string msgType = msg["type"];
-
-        if (msgType == "request_new_piece") {
-            gameManager.handleNewPiece(playerId);
-        }
-        else if (msgType == "move_request") {
-            gameManager.handleMove(playerId, msg["direction"]);
-        }
-        else if (msgType == "rotate_request") {
-            gameManager.handleRotate(playerId);
-        }
-        else if (msgType == "hard_drop_request") {
-            gameManager.handleHardDrop(playerId);
-        }
-        else if (msgType == "move_down_request") {
-            gameManager.handleMoveDown(playerId);
-        }
-
-        broadcastGameState();
-    }
-    catch (const json::parse_error& e) {
-        std::cout << "JSON 파싱 오류: " << e.what() << std::endl;
-    }
-    catch (const std::exception& e) {
-        std::cout << "메시지 처리 오류: " << e.what() << std::endl;
-    }
-}
-
-void NetworkManager::broadcastGameState() {
-    json gameState = gameManager.getGameState();
+void NetworkManager::broadcastGameState(const json& gameState) {
     std::string stateMsg = gameState.dump() + "\n";
     
-    const auto& players = gameManager.getPlayers();  // const 참조로 받기
-    for (const auto& [id, player] : players) {
-        send(player.socket, stateMsg.c_str(), stateMsg.length(), 0);
-    }
+    // 플레이어 정보 요청 이벤트 발행
+    eventBus.publish("request_player_info", {
+        {"action", "get_all_players"},
+        {"game_state", gameState}
+    });
 }
 
 void NetworkManager::sendToPlayer(int playerId, const std::string& message) {
-    auto& player = gameManager.getPlayer(playerId);
-    std::string msg = message + "\n";
-    send(player.socket, msg.c_str(), msg.length(), 0);
+    // 플레이어 소켓 요청 이벤트 발행
+    eventBus.publish("request_player_info", {
+        {"action", "get_player_socket"},
+        {"player_id", playerId},
+        {"message", message}
+    });
 } 

@@ -1,19 +1,19 @@
 #pragma once
 #include <string>
 #include <nlohmann/json.hpp>
-#include "GameManager.hpp"
+#include "Event.hpp"
 
 class NetworkManager {
 private:
     int listenSocket;
-    GameManager& gameManager;
+    EventBus& eventBus;
 
 public:
-    NetworkManager(int port, GameManager& gm);
+    NetworkManager(int port, EventBus& bus);
     ~NetworkManager();
+    void setupEventHandlers();
     void acceptClient();
-    void handleClientMessages(int playerId);
-    void handleClientMessage(int playerId, const std::string& message);
-    void broadcastGameState();
+    void handleClientMessages(int playerId, int clientSocket);
+    void broadcastGameState(const json& gameState);
     void sendToPlayer(int playerId, const std::string& message);
 }; 
