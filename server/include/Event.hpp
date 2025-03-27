@@ -1,25 +1,21 @@
 #pragma once
 #include <string>
-#include <nlohmann/json.hpp>
+#include "SimpleMessagePack.hpp"
 #include <functional>
 #include <map>
 #include <vector>
 #include <memory>
 
-using json = nlohmann::json;
-
-// 이벤트 기본 클래스
-class Event {
-public:
-    std::string type;
-    json data;
+// Event 클래스 정의
+struct Event {
+    std::string name;
+    MessageData data;
     
-    Event(const std::string& eventType, const json& eventData = {})
-        : type(eventType), data(eventData) {}
-    virtual ~Event() = default;
+    Event(const std::string& eventName, const MessageData& eventData = MessageData())
+        : name(eventName), data(eventData) {}
 };
 
-// 이벤트 버스 - 이벤트 발행/구독 시스템
+// EventBus 클래스 정의
 class EventBus {
 private:
     // 이벤트 타입별 핸들러 맵
@@ -33,15 +29,15 @@ public:
     
     // 이벤트 발행
     void publish(const Event& event) {
-        if (handlers.find(event.type) != handlers.end()) {
-            for (const auto& handler : handlers[event.type]) {
+        if (handlers.find(event.name) != handlers.end()) {
+            for (const auto& handler : handlers[event.name]) {
                 handler(event);
             }
         }
     }
     
     // 편의를 위한 오버로드
-    void publish(const std::string& eventType, const json& data = {}) {
+    void publish(const std::string& eventType, const MessageData& data = MessageData()) {
         publish(Event(eventType, data));
     }
 };

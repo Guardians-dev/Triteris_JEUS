@@ -5,6 +5,8 @@ import json
 import threading
 import sys
 import time
+import msgpack  # MessagePack 라이브러리 추가
+import struct   # 바이너리 데이터 처리를 위한 라이브러리
 
 # 색상 정의
 COLORS = {
@@ -334,85 +336,221 @@ class TetrisGame:
                 "score": self.score
             })
 
-    def send_to_server(self, data):
+    def pack_message(self, data):
+        """데이터를 MessagePack 형식으로 변환"""
+        packed_data = msgpack.packb(data)
+        # 메시지 길이 정보 추가 (4바이트)
+        header = struct.pack(">I", len(packed_data))
+        return header + packed_data
+    
+    def unpack_message(self, data):
+        """MessagePack 형식의 데이터를 파이썬 객체로 변환"""
         try:
-            self.socket.send(json.dumps(data).encode())
-        except:
-            print("서버 통신 오류")
-
-    def process_server_message(self, data):
-        try:
-            if data["type"] == "game_state":
-                player_data = data["players"].get(str(self.player_id))
-                if player_data:
-                    # 게임 상태 업데이트
-                    self.board = player_data.get("board", self.board)
-                    self.current_piece = player_data.get("current_piece")
-                    self.current_pos = player_data.get("position")
-                    self.score = player_data.get("score", self.score)
-                
-                # 다른 플레이어 상태 업데이트
-                self.other_players = {
-                    k: v for k, v in data["players"].items() 
-                    if str(k) != str(self.player_id)
-                }
-            elif data["type"] == "game_over":
-                if str(data["player_id"]) == str(self.player_id):
-                    self.game_over = True
-            elif data["type"] == "error":
-                print(f"서버 오류: {data.get('message', '알 수 없는 오류')}")
+            result = msgpack.unpackb(data, raw=False, use_list=False)
+            print(f"언패킹된 메시지: {result}")  # 디버깅용
+            return result
         except Exception as e:
-            print(f"메시지 처리 중 오류: {e}")
+            print(f"메시지 언패킹 오류: {e}")
+            raise
 
     def connect_to_server(self):
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         try:
+            print(f"서버({('localhost', 12345)})에 연결 시도 중...")
             self.socket.connect(('localhost', 12345))
+            print("서버에 연결됨, 초기 메시지 전송 중...")
             
-            # 초기 연결 메시지 전송
-            initial_data = {
+            # 초기 연결 메시지 전송 - send_message 함수 사용
+            self.send_message({
                 "type": "connect",
                 "nickname": f"Player{random.randint(1000, 9999)}"
-            }
-            self.send_to_server(initial_data)
+            })
             
-            # 서버로부터 플레이어 ID 받기
-            response = self.socket.recv(1024)
-            data = json.loads(response.decode())
-            self.player_id = data.get("player_id")
-            print(f"서버에 연결됨 (ID: {self.player_id})")
+            # 타임아웃 설정 (10초)
+            self.socket.settimeout(10)
             
-            # 메시지 수신 스레드 시작
-            threading.Thread(target=self.handle_server_messages, daemon=True).start()
+            # 서버로부터 응답 직접 받기 (동기식)
+            print("서버 응답 대기 중...")
             
+            try:
+                # 메시지 길이 정보(4바이트) 읽기
+                header = self.socket.recv(4)
+                if not header or len(header) != 4:
+                    raise ConnectionError("서버로부터 응답 헤더를 받지 못했습니다")
+                
+                # 메시지 길이 계산
+                message_size = struct.unpack(">I", header)[0]
+                print(f"수신할 메시지 크기: {message_size} 바이트")
+                
+                # 메시지 본문 읽기
+                message_data = b""
+                remaining = message_size
+                
+                while remaining > 0:
+                    chunk = self.socket.recv(min(4096, remaining))
+                    if not chunk:
+                        raise ConnectionError("서버와의 연결이 종료되었습니다")
+                    message_data += chunk
+                    remaining -= len(chunk)
+                
+                # MessagePack 데이터 파싱
+                response = self.unpack_message(message_data)
+                print(f"서버 응답: {response}")
+                
+                # 응답 처리
+                if response.get("type") == "connect_response":
+                    self.player_id = response.get("player_id")
+                    print(f"플레이어 ID 설정됨: {self.player_id}")
+                    
+                    # 타임아웃 제거 및 메시지 수신 스레드 시작
+                    self.socket.settimeout(None)
+                    self.receiver_thread = threading.Thread(target=self.handle_server_messages, daemon=True)
+                    self.receiver_thread.start()
+                else:
+                    raise ValueError(f"예상치 못한 응답 타입: {response.get('type')}")
+                
+            except socket.timeout:
+                print("서버 응답 대기 중 타임아웃 발생")
+                raise TimeoutError("서버 응답 시간 초과 (10초)")
+                
         except Exception as e:
             print(f"서버 연결 중 오류 발생: {e}")
+            if self.socket:
+                self.socket.close()
+                self.socket = None
             raise e
 
+    def send_to_server(self, data):
+        try:
+            # send_message 함수 사용
+            self.send_message(data)
+        except Exception as e:
+            print(f"서버 통신 오류: {e}")
+
     def handle_server_messages(self):
-        buffer = ""
         while True:
             try:
-                data = self.socket.recv(4096).decode()
-                if not data:
+                # 메시지 길이 정보(4바이트) 읽기
+                header = self.socket.recv(4)
+                if not header:
                     print("서버와의 연결이 종료되었습니다.")
                     self.game_over = True
                     break
                 
-                buffer += data
-                while '\n' in buffer:
-                    message, buffer = buffer.split('\n', 1)
-                    if message:  # 빈 메시지가 아닌 경우에만 처리
-                        try:
-                            parsed_message = json.loads(message)
-                            self.process_server_message(parsed_message)
-                        except json.JSONDecodeError as e:
-                            print(f"JSON 파싱 오류: {e}")
-                            
+                if len(header) != 4:
+                    print(f"불완전한 헤더 수신: {len(header)} 바이트")
+                    continue
+                
+                # 메시지 길이 계산
+                message_size = struct.unpack(">I", header)[0]
+                print(f"수신할 메시지 크기: {message_size} 바이트")
+                
+                # 메시지 본문 읽기
+                message_data = b""
+                remaining = message_size
+                
+                while remaining > 0:
+                    chunk = self.socket.recv(min(4096, remaining))
+                    if not chunk:
+                        print("서버와의 연결이 종료되었습니다.")
+                        self.game_over = True
+                        break
+                    message_data += chunk
+                    remaining -= len(chunk)
+                
+                if remaining > 0:
+                    # 메시지를 완전히 받지 못함
+                    continue
+                
+                # MessagePack 데이터 파싱
+                try:
+                    parsed_message = self.unpack_message(message_data)
+                    print(f"처리할 메시지: {parsed_message}")  # 디버깅용
+                    self.process_server_message(parsed_message)
+                except Exception as e:
+                    print(f"메시지 파싱 오류: {e}, 데이터 길이: {len(message_data)}")
+                    
+            except socket.error as e:
+                print(f"소켓 오류: {e}")
+                self.game_over = True
+                break
             except Exception as e:
                 print(f"메시지 수신 중 오류: {e}")
                 self.game_over = True
                 break
+
+    def process_server_message(self, data):
+        try:
+            message_type = data.get("type")
+            print(f"메시지 타입: {message_type}")  # 디버깅용
+            
+            if message_type == "connect_response":
+                self.player_id = data.get("player_id")
+                print(f"플레이어 ID 설정됨: {self.player_id}")
+                
+            elif message_type == "game_state_update" or message_type == "game_state":
+                if "players" in data:
+                    player_data = data["players"].get(str(self.player_id))
+                    if player_data:
+                        # 게임 상태 업데이트
+                        self.board = player_data.get("board", self.board)
+                        self.current_piece = player_data.get("current_piece")
+                        self.current_pos = player_data.get("position")
+                        self.score = player_data.get("score", self.score)
+                    
+                    # 다른 플레이어 상태 업데이트
+                    self.other_players = {
+                        k: v for k, v in data["players"].items() 
+                        if str(k) != str(self.player_id)
+                    }
+                    
+            elif message_type == "game_over":
+                if str(data.get("player_id")) == str(self.player_id):
+                    self.game_over = True
+                
+            elif message_type == "error":
+                print(f"서버 오류: {data.get('message', '알 수 없는 오류')}")
+            
+        except Exception as e:
+            print(f"메시지 처리 중 오류: {e}, 데이터: {data}")
+
+    def send_message(self, message):
+        try:
+            print(f"전송할 메시지: {message}")
+            
+            # MessagePack으로 직렬화
+            packed_msg = msgpack.packb(message, use_bin_type=True)
+            msg_len = len(packed_msg)
+            
+            # 직렬화된 데이터 확인
+            print(f"직렬화된 메시지 크기: {msg_len} 바이트")
+            print("직렬화된 데이터 헥사값:", ' '.join(f'{b:02x}' for b in packed_msg))
+            
+            # 헤더(4바이트) + 메시지 전송
+            header = struct.pack(">I", msg_len)
+            full_message = header + packed_msg
+            
+            print(f"전체 메시지 크기: {len(full_message)} 바이트")
+            print("전송할 헤더 헥사값:", ' '.join(f'{b:02x}' for b in header))
+            
+            # 전송
+            self.socket.sendall(full_message)
+            print(f"메시지 전송 완료")
+            
+        except Exception as e:
+            print(f"메시지 전송 중 오류 발생: {e}")
+    
+    def handle_key_press(self, key):
+        if key == pygame.K_LEFT:
+            self.send_message({"type": "move_left"})
+        elif key == pygame.K_RIGHT:
+            self.send_message({"type": "move_right"})
+        elif key == pygame.K_UP:
+            self.send_message({"type": "rotate"})
+        elif key == pygame.K_DOWN:
+            self.send_message({"type": "move_down"})
+        elif key == pygame.K_SPACE:
+            self.send_message({"type": "hard_drop"})
 
 if __name__ == "__main__":
     game = TetrisGame()

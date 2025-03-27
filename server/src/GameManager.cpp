@@ -1,120 +1,154 @@
 #include "GameManager.hpp"
+#include <iostream>
+#include <algorithm>
 #include <random>
-#include <chrono>
 
-GameManager::GameManager(EventBus& bus) : gameStarted(false), eventBus(bus) {
+GameManager::GameManager(EventBus& bus) : 
+    gameStarted(false),
+    eventBus(bus) {
     setupEventHandlers();
 }
 
 void GameManager::setupEventHandlers() {
     // 클라이언트 연결 이벤트 구독
     eventBus.subscribe("client_connected", [this](const Event& event) {
-        int playerId = event.data["player_id"];
-        int socket = event.data["socket"];
+        int playerId = event.data["player_id"].intValue;
+        int socket = event.data["socket"].intValue;
+        
         this->addPlayer(playerId, socket);
     });
     
     // 클라이언트 연결 종료 이벤트 구독
     eventBus.subscribe("client_disconnected", [this](const Event& event) {
-        int playerId = event.data["player_id"];
+        int playerId = event.data["player_id"].intValue;
         this->removePlayer(playerId);
-        
-        // 게임 상태 업데이트 이벤트 발행
-        eventBus.publish("game_state_updated", this->getGameState());
     });
     
     // 클라이언트 메시지 수신 이벤트 구독
     eventBus.subscribe("client_message_received", [this](const Event& event) {
-        int playerId = event.data["player_id"];
-        std::string msgType = event.data["type"];
+        std::string type = event.data["type"].stringValue;
+        int playerId = event.data["player_id"].intValue;
         
-        if (msgType == "request_new_piece") {
-            this->handleNewPiece(playerId);
+        if (type == "move_left") {
+            handleMove(playerId, -1);
         }
-        else if (msgType == "move_request") {
-            this->handleMove(playerId, event.data["direction"]);
+        else if (type == "move_right") {
+            handleMove(playerId, 1);
         }
-        else if (msgType == "rotate_request") {
-            this->handleRotate(playerId);
+        else if (type == "rotate") {
+            handleRotate(playerId);
         }
-        else if (msgType == "hard_drop_request") {
-            this->handleHardDrop(playerId);
+        else if (type == "move_down") {
+            handleMoveDown(playerId);
         }
-        else if (msgType == "move_down_request") {
-            this->handleMoveDown(playerId);
+        else if (type == "hard_drop") {
+            handleHardDrop(playerId);
         }
-        
-        // 게임 상태 업데이트 이벤트 발행
-        eventBus.publish("game_state_updated", this->getGameState());
+        else {
+            std::cout << "알 수 없는 메시지 타입: " << type << std::endl;
+        }
+    });
+    
+    // 게임 상태 요청 이벤트 구독
+    eventBus.subscribe("request_game_state", [this](const Event& event) {
+        MessageData gameState = this->getGameState();
+        eventBus.publish("game_state_updated", gameState);
     });
     
     // 플레이어 정보 요청 이벤트 구독
     eventBus.subscribe("request_player_info", [this](const Event& event) {
-        std::string action = event.data["action"];
+        std::string action = event.data["action"].stringValue;
         
         if (action == "get_all_players") {
-            json playerData;
+            MessageData playerData;
             for (const auto& [id, player] : players) {
-                playerData[std::to_string(id)] = {
-                    {"socket", player.socket}
-                };
+                MessageData playerInfo;
+                playerInfo["socket"] = player.getPlayerSocket(id);
+                playerData[std::to_string(id)] = playerInfo;
             }
-            eventBus.publish("player_info_response", {
-                {"action", "all_players_info"},
-                {"players", playerData}
-            });
+            
+            MessageData response;
+            response["action"] = "all_players_info";
+            response["players"] = playerData;
+            
+            if (event.data.contains("game_state")) {
+                response["game_state"] = event.data["game_state"];
+            }
+            
+            eventBus.publish("player_info_response", response);
         }
         else if (action == "get_player_socket") {
-            int playerId = event.data["player_id"];
+            int playerId = event.data["player_id"].intValue;
             if (players.find(playerId) != players.end()) {
-                eventBus.publish("player_info_response", {
-                    {"action", "player_socket_info"},
-                    {"player_id", playerId},
-                    {"socket", players[playerId].socket}
-                });
+                MessageData response;
+                response["action"] = "player_socket_info";
+                response["player_id"] = playerId;
+                response["socket"] = players[playerId].getPlayerSocket(playerId);
+                
+                if (event.data.contains("message")) {
+                    response["message"] = event.data["message"];
+                }
+                
+                eventBus.publish("player_info_response", response);
             }
         }
     });
 }
 
 void GameManager::addPlayer(int playerId, int socket) {
-    PlayerInfo newPlayer;
-    newPlayer.socket = socket;
-    newPlayer.score = 0;
-    newPlayer.isReady = false;
+    // PlayerInfo 객체 생성 및 초기화
+    players.emplace(std::piecewise_construct,
+                   std::forward_as_tuple(playerId),
+                   std::forward_as_tuple(eventBus));
     
+    // 플레이어 정보 설정
+    players[playerId].addPlayer(playerId, socket);
+    
+    // 새 조각 생성
     auto [piece, blockType] = generateNewPiece();
-    newPlayer.currentPiece = {
-        {"shape", piece},
-        {"block_type", blockType}
-    };
-    newPlayer.currentBlockType = blockType;
-    newPlayer.currentPos = {0, 5};
-    
-    players[playerId] = newPlayer;
     
     // 플레이어 추가 완료 이벤트 발행
-    eventBus.publish("player_added", {{"player_id", playerId}});
+    MessageData playerAddedData;
+    playerAddedData["player_id"] = playerId;
+    eventBus.publish("player_added", playerAddedData);
 }
 
 void GameManager::removePlayer(int playerId) {
     players.erase(playerId);
+    
     // 플레이어 제거 완료 이벤트 발행
-    eventBus.publish("player_removed", {{"player_id", playerId}});
+    MessageData playerRemovedData;
+    playerRemovedData["player_id"] = playerId;
+    eventBus.publish("player_removed", playerRemovedData);
 }
 
 void GameManager::handleNewPiece(int playerId) {
     auto& player = players[playerId];
     auto [piece, blockType] = generateNewPiece();
-    player.currentPiece = {
-        {"shape", piece},
-        {"block_type", blockType}
-    };
+    player.currentPiece = MessageData();  // 빈 객체로 초기화
+    player.currentPiece["shape"] = piece;
+    player.currentPiece["block_type"] = blockType;
     player.currentBlockType = blockType;
     
-    // 블록의 시작 위치를 중앙으로 수정
-    int startX = (GRID_WIDTH / 2) - (piece[0].size() / 2);  // 블록 너비의 절반을 고려하여 중앙 정렬
-    player.currentPos = {0, startX};  // y는 0, x는 중앙
+    int startX = (GRID_WIDTH / 2) - (piece["shape"][0].size() / 2);
+    player.currentPos = {0, startX};
+    
+    // 게임 오버 체크 추가
+    if (!isValidMove(player.board, player.currentPiece, player.currentPos)) {
+        // 게임 오버 이벤트 발생
+        MessageData gameOverData;
+        gameOverData["player_id"] = playerId;
+        gameOverData["score"] = player.score;
+        eventBus.publish("game_over", gameOverData);
+    }
+
+    // 게임 상태 변경 시 이벤트 발행
+    MessageData gameStateData;
+    gameStateData["board"] = player.board;
+    gameStateData["score"] = player.score;
+    gameStateData["current_piece"] = player.currentPiece;
+    gameStateData["player_id"] = playerId;
+    eventBus.publish("game_state_changed", gameStateData);
 }
 
 void GameManager::handleMove(int playerId, int direction) {
@@ -127,31 +161,47 @@ void GameManager::handleMove(int playerId, int direction) {
     if (isValidMove(player.board, player.currentPiece, newPos)) {
         player.currentPos = newPos;
     }
+
+    // 게임 상태 변경 시 이벤트 발행
+    MessageData gameStateData;
+    gameStateData["board"] = player.board;
+    gameStateData["score"] = player.score;
+    gameStateData["current_piece"] = player.currentPiece;
+    gameStateData["player_id"] = playerId;
+    eventBus.publish("game_state_changed", gameStateData);
 }
 
 void GameManager::handleRotate(int playerId) {
     auto& player = players[playerId];
-    json rotatedShape = rotatePiece(player.currentPiece["shape"]);
+    MessageData rotatedShape = rotatePiece(player.currentPiece["shape"]);
     
-    json rotatedPiece = {
-        {"shape", rotatedShape},
-        {"block_type", player.currentBlockType}
-    };
+    MessageData rotatedPiece;
+    rotatedPiece["shape"] = rotatedShape;
+    rotatedPiece["block_type"] = player.currentBlockType;
     
     if (isValidMove(player.board, rotatedPiece, player.currentPos)) {
         player.currentPiece = rotatedPiece;
     }
+
+    // 게임 상태 변경 시 이벤트 발행
+    MessageData gameStateData;
+    gameStateData["board"] = player.board;
+    gameStateData["score"] = player.score;
+    gameStateData["current_piece"] = player.currentPiece;
+    gameStateData["player_id"] = playerId;
+    eventBus.publish("game_state_changed", gameStateData);
 }
 
-bool GameManager::isValidMove(const vector<vector<int>>& board, const json& piece, const vector<int>& pos) {
-    const json& shape = piece["shape"];
-    for (size_t y = 0; y < shape.size(); y++) {
-        for (size_t x = 0; x < shape[y].size(); x++) {
-            if (shape[y][x] == 1) {
+bool GameManager::isValidMove(const vector<vector<int>>& board, const MessageData& piece, const vector<int>& pos) {
+    const MessageData& shape = piece["shape"];
+    for (size_t y = 0; y < shape.arrayValue.size(); y++) {
+        for (size_t x = 0; x < shape.arrayValue[y].arrayValue.size(); x++) {
+            if (shape.arrayValue[y].arrayValue[x].intValue == 1) {
                 int newY = pos[0] + y;
                 int newX = pos[1] + x;
                 
-                if (newY >= GRID_HEIGHT || newX < 0 || newX >= GRID_WIDTH ||
+                // 음수 y 좌표도 체크에 포함
+                if (newY < 0 || newY >= GRID_HEIGHT || newX < 0 || newX >= GRID_WIDTH ||
                     (newY >= 0 && board[newY][newX] != 0)) {
                     return false;
                 }
@@ -161,60 +211,87 @@ bool GameManager::isValidMove(const vector<vector<int>>& board, const json& piec
     return true;
 }
 
-pair<json, int> GameManager::generateNewPiece() {
-    vector<vector<vector<int>>> shapes = {
-        {{1, 1, 1, 1}},  // I
-        {{1, 1}, {1, 1}},  // O
-        {{1, 1, 1}, {0, 1, 0}},  // T
-        {{1, 1, 1}, {1, 0, 0}},  // L
-        {{1, 1, 1}, {0, 0, 1}},  // J
-        {{1, 1, 0}, {0, 1, 1}},  // S
-        {{0, 1, 1}, {1, 1, 0}}   // Z
+std::pair<MessageData, int> GameManager::generateNewPiece() {
+    static const std::vector<std::vector<std::vector<int>>> PIECES = {
+        // I
+        {
+            {1, 1, 1, 1}
+        },
+        // J
+        {
+            {1, 0, 0},
+            {1, 1, 1}
+        },
+        // L
+        {
+            {0, 0, 1},
+            {1, 1, 1}
+        },
+        // O
+        {
+            {1, 1},
+            {1, 1}
+        },
+        // S
+        {
+            {0, 1, 1},
+            {1, 1, 0}
+        },
+        // T
+        {
+            {0, 1, 0},
+            {1, 1, 1}
+        },
+        // Z
+        {
+            {1, 1, 0},
+            {0, 1, 1}
+        }
     };
     
-    static auto seed = chrono::system_clock::now().time_since_epoch().count();
-    static mt19937 gen(seed);
-    uniform_int_distribution<> dis(0, shapes.size() - 1);
+    // 랜덤 조각 선택
+    static std::random_device rd;
+    static std::mt19937 gen(rd());
+    std::uniform_int_distribution<> dis(0, PIECES.size() - 1);
+    int blockType = dis(gen);
     
-    int randomIndex = dis(gen);
-    return {json(shapes[randomIndex]), randomIndex + 1};
+    // MessageData 객체 생성
+    MessageData piece;
+    piece["shape"] = PIECES[blockType];
+    
+    return {piece, blockType};
 }
 
-json GameManager::rotatePiece(const json& piece) {
-    size_t rows = piece.size();
-    size_t cols = piece[0].size();
+MessageData GameManager::rotatePiece(const MessageData& piece) {
+    const MessageData& shape = piece["shape"];
+    int n = shape.size();
+    int m = shape[0].size();
     
-    json rotated = json::array();
-    for (size_t i = 0; i < cols; i++) {
-        json newRow = json::array();
-        for (size_t j = 0; j < rows; j++) {
-            newRow.push_back(piece[rows - 1 - j][i]);
+    MessageData rotated = MessageData::array();
+    // 90도 시계방향 회전
+    for (int i = 0; i < m; i++) {
+        MessageData row = MessageData::array();
+        for (int j = n - 1; j >= 0; j--) {
+            row.push_back(shape[j][i].intValue);
         }
-        rotated.push_back(newRow);
+        rotated.push_back(row);
     }
-    
     return rotated;
 }
 
-json GameManager::getGameState() const {
-    json gameState = {{"type", "game_state"}, {"players", json::object()}};
+MessageData GameManager::getGameState() const {
+    MessageData state;
+    state["players"] = MessageData();
     
     for (const auto& [id, player] : players) {
-        json currentPiece = {
-            {"shape", player.currentPiece["shape"]},
-            {"block_type", player.currentBlockType}
-        };
+        MessageData playerData;
+        // 플레이어 정보 설정
+        // ...
         
-        gameState["players"][to_string(id)] = {
-            {"score", player.score},
-            {"board", player.board},
-            {"nickname", player.nickname},
-            {"current_piece", currentPiece},
-            {"position", player.currentPos}
-        };
+        state["players"][std::to_string(id)] = playerData;
     }
     
-    return gameState;
+    return state;
 }
 
 PlayerInfo& GameManager::getPlayer(int playerId) {
@@ -236,11 +313,11 @@ void GameManager::handleHardDrop(int playerId) {
 
 void GameManager::freezePiece(int playerId) {
     auto& player = players[playerId];
-    const json& shape = player.currentPiece["shape"];
+    const MessageData& shape = player.currentPiece["shape"];
     
-    for (size_t y = 0; y < shape.size(); y++) {
-        for (size_t x = 0; x < shape[y].size(); x++) {
-            if (shape[y][x] == 1) {
+    for (size_t y = 0; y < shape.arrayValue.size(); y++) {
+        for (size_t x = 0; x < shape.arrayValue[y].arrayValue.size(); x++) {
+            if (shape.arrayValue[y].arrayValue[x].intValue == 1) {
                 int boardY = player.currentPos[0] + y;
                 int boardX = player.currentPos[1] + x;
                 if (boardY >= 0 && boardY < GRID_HEIGHT && 
@@ -251,6 +328,14 @@ void GameManager::freezePiece(int playerId) {
         }
     }
     checkLines(playerId);
+
+    // 게임 상태 변경 시 이벤트 발행
+    MessageData gameStateData;
+    gameStateData["board"] = player.board;
+    gameStateData["score"] = player.score;
+    gameStateData["current_piece"] = player.currentPiece;
+    gameStateData["player_id"] = playerId;
+    eventBus.publish("game_state_changed", gameStateData);
 }
 
 void GameManager::checkLines(int playerId) {
@@ -279,6 +364,14 @@ void GameManager::checkLines(int playerId) {
         }
         player.score += lines_to_clear.size() * 100;
     }
+
+    // 게임 상태 변경 시 이벤트 발행
+    MessageData gameStateData;
+    gameStateData["board"] = player.board;
+    gameStateData["score"] = player.score;
+    gameStateData["current_piece"] = player.currentPiece;
+    gameStateData["player_id"] = playerId;
+    eventBus.publish("game_state_changed", gameStateData);
 }
 
 void GameManager::handleMoveDown(int playerId) {

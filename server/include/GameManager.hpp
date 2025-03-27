@@ -1,11 +1,10 @@
 #pragma once
 #include <vector>
 #include <map>
-#include <nlohmann/json.hpp>
 #include "PlayerInfo.hpp"
 #include "Event.hpp"
+#include "SimpleMessagePack.hpp"
 
-using json = nlohmann::json;
 using namespace std;
 
 class GameManager {
@@ -26,14 +25,14 @@ public:
     void handleRotate(int playerId);
     void handleHardDrop(int playerId);
     void handleMoveDown(int playerId);
-    bool isValidMove(const vector<vector<int>>& board, const json& piece, const vector<int>& pos);
+    bool isValidMove(const vector<vector<int>>& board, const MessageData& piece, const vector<int>& pos);
     void freezePiece(int playerId);
     void checkLines(int playerId);
-    json getGameState() const;
+    MessageData getGameState() const;
     PlayerInfo& getPlayer(int playerId);
     const map<int, PlayerInfo>& getPlayers() const { return players; }
 
 private:
-    pair<json, int> generateNewPiece();
-    json rotatePiece(const json& piece);
+    pair<MessageData, int> generateNewPiece();
+    MessageData rotatePiece(const MessageData& piece);
 }; 
